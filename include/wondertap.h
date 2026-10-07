@@ -733,4 +733,10 @@ struct wondertap_aux_dev {
 	/** @brief Pointer to the vendor-specific operations table. */
 	const struct wondertap_ops *wonder_ops;
 };
+
+/* Qualcomm publishes the operations through a CNSS platform component. */
+struct wondertap_priv {
+	enum wondertap_ver ver;
+	const struct wondertap_ops *wonder_ops;
+};
 #endif /* __WONDER_WONDERTAP_H__ */

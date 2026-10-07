@@ -52,6 +52,8 @@ ddk_module(
     ],
     deps = [
         ":wonder_headers",
+        "//vendor/oneplus/sm8850:canoe_perf/net/wireless/cfg80211",
+        "//vendor/oneplus/sm8850:canoe_perf/net/mac80211/mac80211",
     ],
 )
 

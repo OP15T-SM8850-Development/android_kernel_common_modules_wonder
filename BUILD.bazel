@@ -10,7 +10,7 @@ load(
 
 label_flag(
     name = "wonder_kernel",
-    build_setting_default = "//common:kernel_aarch64_undefined",
+    build_setting_default = "//vendor/oneplus/sm8850:canoe_perf_base_kernel",
 )
 
 filegroup(

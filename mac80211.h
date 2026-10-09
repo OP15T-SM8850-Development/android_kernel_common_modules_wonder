@@ -17,14 +17,14 @@ extern char *physical_name;
 extern struct ieee80211_supported_band wonder_band_2ghz;
 extern struct ieee80211_supported_band wonder_band_5ghz;
 
-void *wonder_mac80211_init(void);
+void *wonder_mac80211_init(struct device *dev, struct wondertap_data *wondertap);
 void wonder_mac80211_exit(struct wonder_data *wonder);
 #ifdef CONFIG_DEBUG_FS
-void wonder_debugfs_init(void *data);
-void wonder_debugfs_exit(void);
+int wonder_debugfs_init(struct wonder_data *wonder);
+void wonder_debugfs_exit(struct wonder_data *wonder);
 #else
-static inline void wonder_debugfs_init(void *data) {}
-static inline void wonder_debugfs_exit(void) {}
+static inline int wonder_debugfs_init(struct wonder_data *wonder) { return 0; }
+static inline void wonder_debugfs_exit(struct wonder_data *wonder) {}
 #endif
 int wonder_features_init(struct wonder_data *wonder);
 void wonder_features_exit(struct wonder_data *wonder);

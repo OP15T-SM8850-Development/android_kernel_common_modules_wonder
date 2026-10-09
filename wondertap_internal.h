@@ -28,14 +28,19 @@ enum wondertap_state {
 #define WONDERTAP_CACHE_TX_RATE_SET      (1 << 1)
 #define WONDERTAP_CACHE_BSSID_SET        (1 << 2)
 #define WONDERTAP_CACHE_COUNTRY_CODE_SET (1 << 3)
-#define WONDERTAP_CACHE_CHANNEL_HOPPING_SET (1 << 4)
-#define WONDERTAP_CACHE_AMSDU_SET        (1 << 5)
 
 struct wonder_sta_update_work {
 	struct work_struct work;
 	struct wonder_data *wonder;
 	struct wondertap_station_info sta_info;
 	enum wondertap_station_action action;
+};
+
+#define WONDERTAP_MAX_STATION_TABLE_SIZE 32
+
+struct wondertap_station_entry {
+	bool in_use;
+	struct wondertap_station_info info;
 };
 
 struct wondertap_data {
@@ -58,6 +63,7 @@ struct wondertap_data {
 	/* MAC address for station query via debugfs */
 	u8 query_mac_addr[ETH_ALEN];
 	const struct wondertap_ops *wonder_ops;
+	struct wondertap_station_entry station_table[WONDERTAP_MAX_STATION_TABLE_SIZE];
 };
 
 /**
@@ -71,6 +77,7 @@ struct wondertap_data {
 static inline void wondertap_prep(struct wondertap_data *wondertap)
 {
 	wondertap->state = WONDERTAP_STATE_DOWN;
+	memset(wondertap->station_table, 0, sizeof(wondertap->station_table));
 	mutex_init(&wondertap->lock);
 }
 

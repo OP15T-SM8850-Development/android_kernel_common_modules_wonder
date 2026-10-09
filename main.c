@@ -7,7 +7,6 @@
  * network device and kicking off the mac80211 registration process.
  */
 
-#include "include/wondertap.h"
 #include <linux/auxiliary_bus.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
@@ -28,13 +27,13 @@
 module_param(physical_name, charp, 0444);
 MODULE_PARM_DESC(physical_name, "Interface name to use (e.g., wlan0, radiotap0, ...)");
 
-#define WONDER_MAX_COMPAT_VERSIONS 6
-static int wonder_ver_match_table[WONDER_MAX_COMPAT_VERSIONS] = {
+static int wonder_ver_match_table[WONDER_VERSION_MAX] = {
 	WONDER_VERSION_3_4,
 	WONDER_VERSION_3_5,
 	WONDER_VERSION_3_6_4,
 	WONDER_VERSION_3_6_3,
 	WONDER_VERSION_3_6_5,
+	WONDER_VERSION_3_6_6,
 	-1,
 };
 
@@ -46,7 +45,7 @@ static bool wonder_ver_can_support(enum wondertap_ver device_ver, enum wondertap
 	if (ver < 0 || driver_ver >= WONDER_VERSION_MAX)
 		return false;
 
-	for (i = 0; i < WONDER_MAX_COMPAT_VERSIONS; i++) {
+	for (i = 0; i < WONDER_VERSION_MAX; i++) {
 		if (wonder_ver_match_table[i] == -1)
 			break;
 		if (wonder_ver_match_table[i] == device_ver)
@@ -64,19 +63,16 @@ static int wonder_probe(struct auxiliary_device *adev,
 	struct device *dev = &wonder_adev->adev.dev;
 	int ret;
 
-	wonder = wonder_mac80211_init();
-	if (!wonder)
-		return -ENODEV;
+	wondertap = devm_kzalloc(dev, sizeof(*wondertap), GFP_KERNEL);
+	if (!wondertap)
+		return -ENOMEM;
 
-	wondertap = &wonder->wondertap_data;
 	/* Assign wondertap interface version will be used in the match process. */
-	wondertap->ver = WONDER_VERSION_3_6_5;
-	auxiliary_set_drvdata(&wonder_adev->adev, wonder);
+	wondertap->ver = WONDER_VERSION_3_6_6;
 
 	if (!wonder_ver_can_support(wonder_adev->ver, wondertap->ver)) {
 		dev_err(dev, "%s(): wondertap interface version mismatch(%d,%d)!\n",
 			__func__, wonder_adev->ver, wondertap->ver);
-		wonder_mac80211_exit(wonder);
 		return -EINVAL;
 	}
 
@@ -91,21 +87,26 @@ static int wonder_probe(struct auxiliary_device *adev,
 		dev_err(dev, "Failed to get wondertap capabilities, error: %d\n", ret);
 		return ret;
 	}
-	wonder_debugfs_init(wonder);
 
-	return 0;
+	wonder = wonder_mac80211_init(dev, wondertap);
+	if (!wonder)
+		return -ENODEV;
+
+	auxiliary_set_drvdata(&wonder_adev->adev, wonder);
+	return wonder_debugfs_init(wonder);
 }
 
 static void wonder_remove(struct auxiliary_device *adev)
 {
 	struct wonder_data *wonder = auxiliary_get_drvdata(adev);
 
-	wonder_debugfs_exit();
+	wonder_debugfs_exit(wonder);
 	wonder_mac80211_exit(wonder);
 }
 
 static const struct auxiliary_device_id wonder_aux_id_table[] = {
 	{ .name = "bcmdhd4390.wondertap" },
+	{ .name = "iwlmld.wondertap" },
 	{},
 };
 MODULE_DEVICE_TABLE(auxiliary, wonder_aux_id_table);
@@ -139,29 +140,39 @@ static int wonder_component_bind(struct device *dev)
 		goto unbind;
 	}
 	priv = dev_get_drvdata(&provider->dev);
-	if (!priv || !priv->wonder_ops || priv->ver != WONDER_VERSION_3_6_5) {
+	if (!priv || !priv->wonder_ops || priv->ver != WONDER_VERSION_3_6_6) {
 		ret = -EINVAL;
 		goto put_provider;
 	}
-	wonder = wonder_mac80211_init();
-	if (!wonder) {
+	tap = devm_kzalloc(dev, sizeof(*tap), GFP_KERNEL);
+	if (!tap) {
 		ret = -ENOMEM;
 		goto put_provider;
 	}
-	tap = &wonder->wondertap_data;
-	tap->ver = WONDER_VERSION_3_6_5;
+	tap->ver = WONDER_VERSION_3_6_6;
 	tap->wifi_ver = priv->ver;
 	tap->wonder_ops = priv->wonder_ops;
 	ret = wondertap_get_capabilities(tap, &tap->cap);
 	if (ret) {
-		wonder_mac80211_exit(wonder);
-		goto put_provider;
+		goto free_tap;
+	}
+	wonder = wonder_mac80211_init(dev, tap);
+	if (!wonder) {
+		ret = -ENODEV;
+		goto free_tap;
 	}
 	dev_set_drvdata(dev, wonder);
-	wonder_debugfs_init(wonder);
+	ret = wonder_debugfs_init(wonder);
+	if (ret) {
+		dev_set_drvdata(dev, NULL);
+		wonder_mac80211_exit(wonder);
+		goto free_tap;
+	}
 	put_device(&provider->dev);
 	return 0;
 
+free_tap:
+	devm_kfree(dev, tap);
 put_provider:
 	put_device(&provider->dev);
 unbind:
@@ -171,8 +182,12 @@ unbind:
 
 static void wonder_component_unbind(struct device *dev)
 {
-	wonder_debugfs_exit();
-	wonder_mac80211_exit(dev_get_drvdata(dev));
+	struct wonder_data *wonder = dev_get_drvdata(dev);
+	struct wondertap_data *tap = wonder->wondertap_data;
+
+	wonder_debugfs_exit(wonder);
+	wonder_mac80211_exit(wonder);
+	devm_kfree(dev, tap);
 	dev_set_drvdata(dev, NULL);
 	component_unbind_all(dev, NULL);
 }

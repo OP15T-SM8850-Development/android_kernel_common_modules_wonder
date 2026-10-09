@@ -45,6 +45,9 @@ static void wondertap_dump_init_params(struct wondertap_init_params *params)
 	pr_debug("    MAC: %02x:XX:XX:XX:XX:%02x\n", params->mac_addr[0],
 		params->mac_addr[5]);
 	pr_debug("    BSSID: %02x:XX:XX:XX:XX:%02x\n", params->bssid[0], params->bssid[5]);
+	pr_debug("    Features: AMSDU %d, AMPDU %d, RA %d, CH %d\n", params->amsdu_enable,
+		params->ampdu_enable, params->rate_adaptation_enable,
+		params->channel_hopping_enable);
 	pr_debug("===============================================\n");
 }
 
@@ -71,24 +74,29 @@ int wondertap_init(struct wondertap_data *wondertap, const struct wondertap_init
 		goto out;
 	}
 
-	eth_random_addr(wondertap->mac_addr);
+	if (is_valid_ether_addr(_params->mac_addr))
+		ether_addr_copy(wondertap->mac_addr, _params->mac_addr);
+	else
+		eth_random_addr(wondertap->mac_addr);
+
 	params.channel = wondertap->cached_freq;
 	params.tx_rate = wondertap->cached_tx_rate;
-	memcpy(params.bssid, wondertap->cached_bssid, ETH_ALEN);
-	memcpy(params.mac_addr, wondertap->mac_addr, ETH_ALEN);
+	ether_addr_copy(params.bssid, wondertap->cached_bssid);
+	ether_addr_copy(params.mac_addr, wondertap->mac_addr);
 	memcpy(params.country_code, wondertap->cached_country_code,
 	       sizeof(wondertap->cached_country_code));
 
+	params.rate_adaptation_enable = _params->rate_adaptation_enable;
 	if (_params->rate_adaptation_enable) {
-		params.rate_adaptation_enable = _params->rate_adaptation_enable;
 		params.tx_rate_mask.max_preamble = wondertap->cached_tx_rate.preamble;
-		params.tx_rate_mask.max_bw = WONDERTAP_RA_MAX_BW;
-		params.tx_rate_mask.max_nss = WONDERTAP_RA_MAX_NSS;
-		params.tx_rate_mask.max_mcs = WONDERTAP_RA_MAX_MCS;
+		params.tx_rate_mask.max_bw = wondertap->cached_tx_rate.bw;
+		params.tx_rate_mask.max_nss = wondertap->cached_tx_rate.nss;
+		params.tx_rate_mask.max_mcs = wondertap->cached_tx_rate.mcs;
 	}
 
-	if (_params->channel_hopping_enable)
-		params.channel_hopping_enable = _params->channel_hopping_enable;
+	params.channel_hopping_enable = _params->channel_hopping_enable;
+	params.ampdu_enable = _params->ampdu_enable;
+	params.amsdu_enable = _params->amsdu_enable;
 
 	wondertap_dump_init_params(&params);
 	for (retry = 0; retry <= WONDER_INIT_RETRY_CNT; retry++) {
@@ -155,8 +163,29 @@ out:
 void wondertap_deinit(struct wondertap_data *wondertap)
 {
 	struct wondertap_deinit_params params;
+	int i;
 
 	mutex_lock(&wondertap->lock);
+
+	/* Auto-flush active stations on interface deinit / shutdown */
+	if (wondertap->wonder_ops && wondertap->wonder_ops->set_station_info) {
+		for (i = 0; i < WONDERTAP_MAX_STATION_TABLE_SIZE; i++) {
+			if (wondertap->station_table[i].in_use) {
+				struct wondertap_station_info *info =
+					&wondertap->station_table[i].info;
+
+				pr_debug("%s: Auto-flushing station slot %d MAC %pM AID %u\n",
+					__func__, i, info->mac, info->aid);
+				wondertap->wonder_ops->set_station_info(
+					wondertap->vendor_handle,
+					WONDERTAP_STATION_STATE_DEL,
+					info);
+				wondertap->station_table[i].in_use = false;
+				memset(info, 0, sizeof(*info));
+			}
+		}
+	}
+
 	if (wondertap->wonder_ops && wondertap->wonder_ops->deinit) {
 		memset(&params, 0, sizeof(params));
 		memcpy(params.country_code, wondertap->cached_country_code,
@@ -344,10 +373,12 @@ int wondertap_channel_schedule_request(struct wondertap_data *wondertap,
 	struct channel_schedule_request *cached_schedule = &wondertap->cached_channel_schedule;
 	int i;
 	int ret = 0;
-	size_t list_size = request->channel_list_len *
-			sizeof(struct wondertap_channel_list_params);
+	size_t list_size;
 
 	mutex_lock(&wondertap->lock);
+
+	list_size = request->channel_list_len *
+			sizeof(struct wondertap_channel_list_params);
 
 	if (cached_schedule->channel_list_len != request->channel_list_len) {
 		kfree(cached_schedule->channel_list);
@@ -461,6 +492,7 @@ int wondertap_set_station_info(struct wondertap_data *wondertap,
 		struct wondertap_station_info *info)
 {
 	int ret = 0;
+	int i, free_slot = -1;
 
 	mutex_lock(&wondertap->lock);
 
@@ -478,6 +510,48 @@ int wondertap_set_station_info(struct wondertap_data *wondertap,
 
 	ret = wondertap->wonder_ops->set_station_info(
 		wondertap->vendor_handle, action, info);
+
+	if (ret == 0 && info) {
+		if (action == WONDERTAP_STATION_STATE_NEW) {
+			for (i = 0; i < WONDERTAP_MAX_STATION_TABLE_SIZE; i++) {
+				if (wondertap->station_table[i].in_use &&
+				    ether_addr_equal(wondertap->station_table[i].info.mac,
+						     info->mac)) {
+					wondertap->station_table[i].info = *info;
+					free_slot = -2;
+					break;
+				}
+				if (!wondertap->station_table[i].in_use &&
+				    free_slot == -1) {
+					free_slot = i;
+				}
+			}
+			if (free_slot >= 0) {
+				wondertap->station_table[free_slot].in_use = true;
+				wondertap->station_table[free_slot].info = *info;
+			}
+		} else if (action == WONDERTAP_STATION_STATE_UPDATE) {
+			for (i = 0; i < WONDERTAP_MAX_STATION_TABLE_SIZE; i++) {
+				if (wondertap->station_table[i].in_use &&
+				    ether_addr_equal(wondertap->station_table[i].info.mac,
+						     info->mac)) {
+					wondertap->station_table[i].info = *info;
+					break;
+				}
+			}
+		} else if (action == WONDERTAP_STATION_STATE_DEL) {
+			for (i = 0; i < WONDERTAP_MAX_STATION_TABLE_SIZE; i++) {
+				if (wondertap->station_table[i].in_use &&
+				    ether_addr_equal(wondertap->station_table[i].info.mac,
+						     info->mac)) {
+					wondertap->station_table[i].in_use = false;
+					memset(&wondertap->station_table[i].info, 0,
+					       sizeof(struct wondertap_station_info));
+					break;
+				}
+			}
+		}
+	}
 
 out_unlock:
 	mutex_unlock(&wondertap->lock);

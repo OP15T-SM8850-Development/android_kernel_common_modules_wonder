@@ -25,6 +25,27 @@
 #define WONDER_JP_CHANNEL 44
 #define WONDER_NORMAL_MODE_MTU_SIZE 8000
 
+struct wonder_stats {
+	u64 tx_entry_cnt;
+	u64 tx_success_cnt;
+	u64 rx_entry_cnt;
+	u64 rx_to_mac_cnt;
+};
+
+/**
+ * enum wonder_mac_algo - MAC address generation algorithms
+ * @MAC_ALGO_RANDOM_MAC: Always generate a new random MAC address
+ * @MAC_ALGO_FIX_MAC: Keep the existing valid MAC address, otherwise generate a random one
+ * @MAC_ALGO_SMART_MAC: Smart MAC allocation (e.g., based on specific rules or reserved for future)
+ * @MAC_ALGO_MAX: Upper bound for the MAC algorithms
+ */
+enum wonder_mac_algo {
+	MAC_ALGO_RANDOM_MAC = 0,
+	MAC_ALGO_FIX_MAC = 1,
+	MAC_ALGO_SMART_MAC = 2,
+	MAC_ALGO_MAX,
+};
+
 struct wonder_data {
 	struct ieee80211_hw *hw;
 	struct ieee80211_vif *vif;
@@ -39,14 +60,26 @@ struct wonder_data {
 	bool ampdu_enable;
 	bool amsdu_enable;
 	bool channel_hopping_enable;
+	bool ra_enable;
 	u32 amsdu_threshold;
 	u32 amsdu_delay;
 	bool syna_support_enable;
-	struct wondertap_data wondertap_data;
+	struct wondertap_data *wondertap_data;
 	struct workqueue_struct *workqueue;
 	struct work_struct pdev_down_work;
 	struct notifier_block netdev_notifier;
 	struct delayed_work tx_work;
+	struct delayed_work channel_status_report_work;
+	u32 channel_status_report_interval;
+	struct delayed_work channel_schedule_request_work;
+	u32 channel_schedule_request_interval;
+	struct wonder_stats stats;
+	u8 mac_algorithm;
+	u32 mac_timer_interval_minutes;
+	struct delayed_work mac_expire_work;
+	bool mac_expired;
 };
+
+int wonder_set_mac_algorithm(struct wonder_data *wonder, u8 val);
 
 #endif /* __WONDER_CORE_H__ */

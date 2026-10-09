@@ -135,7 +135,7 @@ static int wonder_vendor_cmd_set_frequency(struct wiphy *wiphy,
 	pr_debug("SET_FREQUENCY: freq=%u MHz, bandwidth=%u\n",
 		params.freq, params.bandwidth);
 
-	return wondertap_set_freq(&wonder->wondertap_data, &params);
+	return wondertap_set_freq(wonder->wondertap_data, &params);
 }
 
 static int wonder_vendor_cmd_set_filter(struct wiphy *wiphy,
@@ -192,7 +192,7 @@ static int wonder_vendor_cmd_set_filter(struct wiphy *wiphy,
 			pr_debug("BSSID filter address: %02X:XX:XX:XX:XX:%02X\n",
 				params.bssid[0], params.bssid[5]);
 		}
-		ret = wondertap_set_bssid_filter(&wonder->wondertap_data, params.bssid);
+		ret = wondertap_set_bssid_filter(wonder->wondertap_data, params.bssid);
 		break;
 	}
 	case WONDER_VEN_ATTR_FILTER_TYPE_FRAME: {
@@ -220,7 +220,7 @@ static int wonder_vendor_cmd_set_filter(struct wiphy *wiphy,
 			pr_debug("Frame filter type=0x%04x, subtype=0x%04x\n",
 						params.frame_type, params.frame_subtype);
 		}
-		ret = wondertap_set_filter(&wonder->wondertap_data,
+		ret = wondertap_set_filter(wonder->wondertap_data,
 			WONDERTAP_FILTER_TYPE_FRAME, &params);
 		break;
 	}
@@ -282,6 +282,29 @@ static bool wonder_tx_rate_sanity_check(u32 preamble, u32 bw, u32 gi, u8 nss, u8
 			pr_warn("Invalid GI %u (VHT only support 0.8 or 0.4)\n", gi);
 			return false;
 		}
+	} else if (preamble == WONDERTAP_RATE_PREAMBLE_HE) {
+		/* HE (802.11ax) max 160MHz and max 8 NSS */
+		if (bw > WONDERTAP_RATE_BW_160) {
+			pr_warn("HE: Invalid BW %u (Max 160MHz)\n", bw);
+			return false;
+		}
+
+		if (nss < 1 || nss > 8) {
+			pr_warn("HE: Invalid NSS %u (Max 8)\n", nss);
+			return false;
+		}
+
+		/* HE MCS max 11 (1024-QAM) */
+		if (mcs > 11) {
+			pr_warn("HE: Invalid MCS %u (Max 11)\n", mcs);
+			return false;
+		}
+
+		if (gi == WONDERTAP_RATE_GI_SHORT || gi > WONDERTAP_RATE_GI_3_2_US) {
+			pr_warn("HE: Invalid GI %u (Expected Default, 0.8us, 1.6us, 3.2us)\n",
+				gi);
+			return false;
+		}
 	} else {
 		pr_err("Unsupported preamble type: %u\n", preamble);
 		return false;
@@ -329,7 +352,7 @@ static int wonder_vendor_cmd_set_fixed_tx_rate(struct wiphy *wiphy,
 		return -EINVAL;
 	}
 
-	return wondertap_set_fixed_tx_rate(&wonder->wondertap_data, &params);
+	return wondertap_set_fixed_tx_rate(wonder->wondertap_data, &params);
 }
 
 static int wonder_vendor_cmd_set_tx_rate_test(struct wiphy *wiphy,
@@ -362,7 +385,7 @@ static int wonder_vendor_cmd_set_tx_rate_test(struct wiphy *wiphy,
 	pr_debug("Apply TX rate: max_preamble=%u, max_bw=%u, max_nss=%u, max_mcs=%u\n",
 		tx_rate_params.max_preamble, tx_rate_params.max_bw, tx_rate_params.max_nss,
 		tx_rate_params.max_mcs);
-	wondertap_set_tx_rate_mask(&wonder->wondertap_data, &tx_rate_params);
+	wondertap_set_tx_rate_mask(wonder->wondertap_data, &tx_rate_params);
 
 	return 0;
 }
@@ -394,7 +417,7 @@ static int wonder_vendor_cmd_set_reg(struct wiphy *wiphy,
 
 	pr_debug("Setting regulatory country code to: %s\n", country_code);
 
-	return wondertap_set_reg(&wonder->wondertap_data, country_code);
+	return wondertap_set_reg(wonder->wondertap_data, country_code);
 }
 
 static int wonder_vendor_cmd_get_if_mac_addr(struct wiphy *wiphy,
@@ -406,7 +429,7 @@ static int wonder_vendor_cmd_get_if_mac_addr(struct wiphy *wiphy,
 	struct sk_buff *skb;
 	u8 mac_addr[ETH_ALEN];
 
-	wondertap_get_interface_mac_address(&wonder->wondertap_data, &mac_addr);
+	wondertap_get_interface_mac_address(wonder->wondertap_data, &mac_addr);
 
 	pr_debug("Handling GET_MAC. Found MAC: %02X:XX:XX:XX:XX:%02X\n",
 		mac_addr[0], mac_addr[5]);
@@ -434,7 +457,7 @@ static int wonder_vendor_cmd_get_cap(struct wiphy *wiphy,
 	struct ieee80211_hw *hw = wiphy_to_ieee80211_hw(wiphy);
 	struct wonder_data *wonder = hw->priv;
 	struct sk_buff *skb;
-	const size_t reply_skb_size = sizeof(u32) + sizeof(u8) * 5;
+	const size_t reply_skb_size = sizeof(u32) * 2 + sizeof(u8) * 6;
 	struct wondertap_capability cap;
 	bool is_monitor_mode = (wdev && wdev->iftype == NL80211_IFTYPE_MONITOR) ? true : false;
 	u32 mtu_size = is_monitor_mode ? INT_MAX : WONDER_NORMAL_MODE_MTU_SIZE;
@@ -442,10 +465,12 @@ static int wonder_vendor_cmd_get_cap(struct wiphy *wiphy,
 	u8 nss;
 	u8 hw_amsdu;
 	u8 hw_ampdu;
+	u8 hw_ra;
 	u8 ch_hopping;
+	u32 max_ch_switch_time_us = 0;
 	int ret;
 
-	ret = wondertap_get_capabilities(&wonder->wondertap_data, &cap);
+	ret = wondertap_get_capabilities(wonder->wondertap_data, &cap);
 
 	if (ret) {
 		pr_err("Failed to get capabilities\n");
@@ -453,15 +478,17 @@ static int wonder_vendor_cmd_get_cap(struct wiphy *wiphy,
 	}
 
 	hbs_support = cap.bits.hbs_support;
-	nss = cap.bits.nss + 1;
+	nss = cap.bits.nss;
 	hw_amsdu = cap.bits.amsdu_aggregation;
 	hw_ampdu = cap.bits.ampdu_aggregation;
+	hw_ra = cap.bits.rate_adaptation;
 	ch_hopping = cap.bits.channel_hopping;
+	max_ch_switch_time_us = cap.maximum_channel_switch_time_us;
 
-	pr_debug("Handling monitor_mode: %d, MTU: %u, HW_AMSDU: %u, HW_AMPDU: %u, "
-		"CH_HOPPING: %u, HBS_SUPPORT: %u, NSS: %u\n",
-		is_monitor_mode, mtu_size, hw_amsdu, hw_ampdu, ch_hopping,
-		hbs_support, nss);
+	pr_debug("Handling is_monitor_mode: %d, MTU: %u, HW_AMSDU: %u, HW_AMPDU: %u, HW_RA: %u, "
+		"CH_HOPPING: %u, HBS_SUPPORT: %u, NSS: %u, MAX_CH_SWITCH_TIME: %u\n",
+		is_monitor_mode, mtu_size, hw_amsdu, hw_ampdu, hw_ra,
+		ch_hopping, hbs_support, nss, max_ch_switch_time_us);
 
 	skb = cfg80211_vendor_cmd_alloc_reply_skb(wiphy, nla_total_size(reply_skb_size));
 	if (!skb) {
@@ -488,6 +515,12 @@ static int wonder_vendor_cmd_get_cap(struct wiphy *wiphy,
 		return -EMSGSIZE;
 	}
 
+	if (nla_put(skb, WONDER_VEN_ATTR_CAP_HW_RA, sizeof(u8), &hw_ra)) {
+		pr_err("Failed to put CAP HW_RA attribute\n");
+		kfree_skb(skb);
+		return -EMSGSIZE;
+	}
+
 	if (nla_put(skb, WONDER_VEN_ATTR_CAP_CH_HOPPING, sizeof(u8), &ch_hopping)) {
 		pr_err("Failed to put CAP CH_HOPPING attribute\n");
 		kfree_skb(skb);
@@ -502,6 +535,13 @@ static int wonder_vendor_cmd_get_cap(struct wiphy *wiphy,
 
 	if (nla_put(skb, WONDER_VEN_ATTR_CAP_NSS, sizeof(u8), &nss)) {
 		pr_err("Failed to put CAP NSS attribute\n");
+		kfree_skb(skb);
+		return -EMSGSIZE;
+	}
+
+	if (nla_put(skb, WONDER_VEN_ATTR_CAP_MAX_CH_SWITCH_TIME,
+		    sizeof(u32), &max_ch_switch_time_us)) {
+		pr_err("Failed to put CAP MAX_CH_SWITCH_TIME attribute\n");
 		kfree_skb(skb);
 		return -EMSGSIZE;
 	}
@@ -541,13 +581,17 @@ static int wonder_vendor_cmd_set_channel_schedule_req(struct wiphy *wiphy,
 		u32 mac_tsf;
 		int ret;
 
-		wondertap_get_capabilities(&wonder->wondertap_data, &cap);
+		ret = wondertap_get_capabilities(wonder->wondertap_data, &cap);
+		if (ret) {
+			pr_err("Failed to get capabilities: %d\n", ret);
+			return ret;
+		}
 		if (!cap.bits.channel_hopping) {
 			pr_err("Channel hopping not enabled in capabilities\n");
 			return -EOPNOTSUPP;
 		}
 
-		ret = wondertap_get_mac_tsf(&wonder->wondertap_data, &mac_tsf);
+		ret = wondertap_get_mac_tsf(wonder->wondertap_data, &mac_tsf);
 		if (ret) {
 			pr_err("Failed to get MAC TSF: %d\n", ret);
 			return ret;
@@ -609,7 +653,7 @@ static int wonder_vendor_cmd_set_channel_schedule_req(struct wiphy *wiphy,
 		}
 	}
 
-	wondertap_channel_schedule_request(&wonder->wondertap_data, &params);
+	wondertap_channel_schedule_request(wonder->wondertap_data, &params);
 
 	kfree(params.channel_list);
 	return 0;
@@ -627,9 +671,9 @@ static int wonder_vendor_cmd_get_mac_tsf(struct wiphy *wiphy,
 	u32 mac_tsf;
 	int ret;
 
-	sys_time_before = ktime_get_ns();
-	ret = wondertap_get_mac_tsf(&wonder->wondertap_data, &mac_tsf);
-	sys_time_after = ktime_get_ns();
+	sys_time_before = ktime_get_boottime_ns();
+	ret = wondertap_get_mac_tsf(wonder->wondertap_data, &mac_tsf);
+	sys_time_after = ktime_get_boottime_ns();
 	if (ret)
 		return ret;
 
@@ -662,7 +706,7 @@ static int wonder_vendor_cmd_get_channel_status_report(struct wiphy *wiphy,
 {
 	struct ieee80211_hw *hw = wiphy_to_ieee80211_hw(wiphy);
 	struct wonder_data *wonder = hw->priv;
-	struct wondertap_data *wondertap = &wonder->wondertap_data;
+	struct wondertap_data *wondertap = wonder->wondertap_data;
 	struct wondertap_channel_status_report *report;
 	struct sk_buff *skb;
 	struct nlattr *list;
@@ -754,6 +798,27 @@ nla_put_failure:
 	return -EMSGSIZE;
 }
 
+static int wonder_map_sta_op_to_action(enum wonder_vendor_station_op op,
+				       enum wondertap_station_action *action)
+{
+	switch (op) {
+	case WONDER_VEN_ATTR_STA_OP_ADD:
+		*action = WONDERTAP_STATION_STATE_NEW;
+		return 0;
+	case WONDER_VEN_ATTR_STA_OP_UPDATE:
+		*action = WONDERTAP_STATION_STATE_UPDATE;
+		return 0;
+	case WONDER_VEN_ATTR_STA_OP_DEL:
+		*action = WONDERTAP_STATION_STATE_DEL;
+		return 0;
+	case WONDER_VEN_ATTR_STA_OP_QUERY:
+		*action = WONDERTAP_STATION_STATE_QUERY;
+		return 0;
+	default:
+		return -EINVAL;
+	}
+}
+
 static int wonder_vendor_cmd_set_station_info(struct wiphy *wiphy,
 					      struct wireless_dev *wdev,
 					      const void *data, int data_len)
@@ -762,6 +827,7 @@ static int wonder_vendor_cmd_set_station_info(struct wiphy *wiphy,
 	struct wonder_data *wonder = hw->priv;
 	struct nlattr *tb[WONDER_VEN_ATTR_STA_INFO_MAX + 1];
 	struct wondertap_station_info sta_info = {0};
+	enum wonder_vendor_station_op op;
 	enum wondertap_station_action action;
 
 	if (nla_parse(tb, WONDER_VEN_ATTR_STA_INFO_MAX, data, data_len,
@@ -777,13 +843,18 @@ static int wonder_vendor_cmd_set_station_info(struct wiphy *wiphy,
 		return -EINVAL;
 	}
 
-	action = nla_get_u32(tb[WONDER_VEN_ATTR_STA_INFO_ACTION]);
-
 	if (nla_len(tb[WONDER_VEN_ATTR_STA_INFO_MAC]) != ETH_ALEN) {
 		pr_err("Invalid MAC address length: %d\n",
 		       nla_len(tb[WONDER_VEN_ATTR_STA_INFO_MAC]));
 		return -EINVAL;
 	}
+
+	op = nla_get_u32(tb[WONDER_VEN_ATTR_STA_INFO_ACTION]);
+	if (wonder_map_sta_op_to_action(op, &action)) {
+		pr_err("Invalid station action op: %u\n", op);
+		return -EINVAL;
+	}
+
 	nla_memcpy(sta_info.mac, tb[WONDER_VEN_ATTR_STA_INFO_MAC], ETH_ALEN);
 
 	if (tb[WONDER_VEN_ATTR_STA_INFO_AID])
@@ -839,7 +910,7 @@ static int wonder_vendor_cmd_set_station_info(struct wiphy *wiphy,
 	pr_debug("SET_STATION_INFO: action=%u, mac=%pM, aid=%u, cap_mask=0x%x\n",
 		    action, sta_info.mac, sta_info.aid, sta_info.capability_mask);
 
-	wondertap_set_station_info(&wonder->wondertap_data, action, &sta_info);
+	wondertap_set_station_info(wonder->wondertap_data, action, &sta_info);
 	return 0;
 }
 
@@ -851,7 +922,7 @@ static int wonder_vendor_cmd_set_features(struct wiphy *wiphy,
 	struct wonder_data *wonder = hw->priv;
 	struct nlattr *tb[WONDER_VEN_ATTR_FEATURE_MAX + 1];
 	u32 feature_id;
-	u8 enable;
+	u8 val;
 
 	if (nla_parse(tb, WONDER_VEN_ATTR_FEATURE_MAX, data, data_len,
 		      wonder_set_features_policy, NULL) < 0) {
@@ -865,19 +936,25 @@ static int wonder_vendor_cmd_set_features(struct wiphy *wiphy,
 	}
 
 	feature_id = nla_get_u32(tb[WONDER_VEN_ATTR_FEATURE_ID]);
-	enable = nla_get_u8(tb[WONDER_VEN_ATTR_FEATURE_ENABLE]);
+	val = nla_get_u8(tb[WONDER_VEN_ATTR_FEATURE_ENABLE]);
 
-	pr_debug("SET_FEATURES: feature_id=%u, enable=%u\n", feature_id, enable);
+	pr_debug("SET_FEATURES: feature_id=%u, enable=%u\n", feature_id, val);
 
 	switch (feature_id) {
 	case WONDER_FEATURE_CHANNEL_HOPPING:
-		wonder->channel_hopping_enable = enable;
-		wonder->wondertap_data.cache_flags |= WONDERTAP_CACHE_CHANNEL_HOPPING_SET;
+		wonder->channel_hopping_enable = val;
 		break;
 	case WONDER_FEATURE_AMSDU:
-		wonder->amsdu_enable = enable;
-		wonder->wondertap_data.cache_flags |= WONDERTAP_CACHE_AMSDU_SET;
+		wonder->amsdu_enable = val;
 		break;
+	case WONDER_FEATURE_AMPDU:
+		wonder->ampdu_enable = val;
+		break;
+	case WONDER_FEATURE_RA:
+		wonder->ra_enable = val;
+		break;
+	case WONDER_FEATURE_MAC_ALGO:
+		return wonder_set_mac_algorithm(wonder, val);
 	default:
 		pr_err("Unknown feature ID: %u\n", feature_id);
 		return -EINVAL;
